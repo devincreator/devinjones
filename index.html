@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <!-- 核心：让 iPhone 把它识别为原生 APP -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Quant Life">
+    <title>Quant Life V42</title>
+    
+    <!-- 引入二维码库 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js"></script>
+    
+    <!-- 动态生成 APP 图标 -->
+    <link rel="apple-touch-icon" id="dynamic-icon">
+
+    <style>
+        :root {
+            --bg-deep: #000000; /* 纯黑背景适配 OLED */
+            --glass-panel: rgba(20, 36, 30, 0.9);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --text-main: #e0eadd;
+            --text-dim: #6c7a75;
+            
+            --c-fruit: #FFB300; --c-bud: #76FF03; --c-wood: #795548; 
+            --c-water: #29B6F6; --c-fire: #FF5252; --c-leaf: #009688; 
+            --c-pollen:#FFEA00; --c-moon: #7C4DFF; --c-wither:#607D8B; 
+            
+            --font: -apple-system, "PingFang SC", sans-serif; /* iOS 原生字体 */
+            --safe-top: env(safe-area-inset-top);
+            --safe-bottom: env(safe-area-inset-bottom);
+        }
+
+        body {
+            background: var(--bg-deep); color: var(--text-main); font-family: var(--font);
+            margin: 0; display: flex; justify-content: center; align-items: center; 
+            min-height: 100vh; overflow: hidden;
+            -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
+            /* 移动端顶对齐 */
+            padding-top: var(--safe-top);
+            padding-bottom: var(--safe-bottom);
+            box-sizing: border-box;
+        }
+
+        /* --- 布局容器 --- */
+        .container { 
+            display: grid; 
+            grid-template-columns: 380px 780px; 
+            grid-template-rows: 60px 1fr 80px; 
+            gap: 20px; width: 1180px; height: 900px;
+            transition: opacity 1s;
+        }
+
+        /* --- 桌面端样式 (默认) --- */
+        .card { background: var(--glass-panel); border: 1px solid var(--glass-border); border-radius: 24px; padding: 24px; position: relative; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+        .top-bar { grid-column: 1 / 3; display: flex; justify-content: center; z-index: 10; pointer-events: none; }
+        .island { pointer-events: auto; background: #111; height: 44px; border-radius: 22px; display: flex; align-items: center; padding: 0 25px; min-width: 240px; border: 1px solid #333; }
+        .left-panel { grid-row: 2 / 4; gap: 20px; display:flex; flex-direction:column; }
+        .right-panel { grid-row: 2 / 3; display:flex; flex-direction:column; }
+        .oracle-panel { grid-column: 2 / 3; grid-row: 3 / 4; display: flex; gap: 15px; align-items: center; }
+        .mobile-only { display: none; }
+
+        /* --- 📱 iPhone 竖屏适配 (核心) --- */
+        @media (max-width: 1000px) {
+            body { 
+                overflow-y: auto; align-items: flex-start; 
+                /* 增加底部 padding，防止被 Safari 地址栏遮挡 */
+                padding: calc(10px + var(--safe-top)) 15px calc(80px + var(--safe-bottom)) 15px;
+            }
+            .container {
+                display: flex; flex-direction: column; width: 100%; height: auto; gap: 15px;
+            }
+            
+            /* 调整顺序：控制台在手边 */
+            .top-bar { order: 0; margin-bottom: 0; width: 100%; }
+            .island { width: 100%; justify-content: space-between; }
+            
+            .oracle-panel { order: 2; height: 70px; flex-shrink: 0; }
+            .right-panel { order: 3; min-height: 420px; flex-shrink: 0; }
+            .left-panel { order: 4; min-height: 300px; flex-shrink: 0; margin-bottom: 50px; }
+
+            /* 手机特定样式微调 */
+            .grid { gap: 6px !important; }
+            .soil { border-radius: 6px; font-size: 10px; }
+            .mobile-only { display: block; }
+            .desktop-only { display: none; }
+            .lock-btn { display: none; } /* 手机端隐藏锁定按钮 */
+            
+            /* iOS 安装引导条 */
+            #install-guide {
+                position: fixed; bottom: 20px; left: 5%; width: 90%; 
+                background: rgba(30,30,30,0.95); border: 1px solid var(--c-bud);
+                padding: 15px; border-radius: 12px; z-index: 10000;
+                display: none; box-shadow: 0 10px 30px #000;
+                animation: slideUp 0.5s ease-out;
+            }
+            #install-guide.show { display: block; }
+            .guide-close { position: absolute; top: 10px; right: 10px; color: #666; cursor: pointer; padding: 5px; }
+        }
+
+        /* --- UI 组件 --- */
+        .ring-box { display: flex; align-items: center; justify-content: center; position: relative; height: 160px; margin: 10px 0; }
+        .ring-svg { transform: rotate(-90deg); width: 140px; height: 140px; }
+        .ring-bg { stroke: rgba(255,255,255,0.1); fill: none; stroke-width: 8; }
+        .ring-val { stroke: var(--c-bud); stroke-dasharray: 440; stroke-dashoffset: 440; transition: stroke-dashoffset 1s; fill: none; stroke-width: 8; stroke-linecap: round; }
+        .ring-text { position: absolute; text-align: center; }
+        .ring-num { font-size: 36px; font-weight: bold; color: #fff; }
+        .ring-label { font-size: 10px; color: var(--text-dim); }
+
+        .btn-base { height: 100%; border-radius: 18px; border: none; font-size: 14px; font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: 0.2s; }
+        .btn-base:active { transform: scale(0.95); }
+        .seed-btn { flex: 1; background: rgba(255,255,255,0.1); color: var(--text-main); }
+        .plan-btn { flex: 1; background: rgba(121,85,72,0.3); color: #d7ccc8; }
+        .nature-btn { flex: 1.5; background: var(--c-bud); color: #000; }
+
+        .grid-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; }
+        .date-display { font-family: monospace; color: var(--text-dim); font-size: 14px; }
+        .grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 10px; flex: 1; align-content: start; }
+        .soil { aspect-ratio: 1; background: rgba(255,255,255,0.05); border-radius: 8px; display: flex; justify-content: center; align-items: center; color: rgba(255,255,255,0.2); cursor: pointer; position: relative; border: 1px solid transparent; }
+        .soil.current-time { border-color: var(--c-bud); box-shadow: inset 0 0 10px rgba(118,255,3,0.2); }
+        
+        /* 模式与状态 */
+        .planning-mode .soil.plan-ghost { border: 1px dashed var(--c-fruit); opacity: 0.8; }
+        .soil.resonance { border: 2px solid #fff; box-shadow: 0 0 10px #fff; z-index: 2; }
+        .c-fruit{background:var(--c-fruit);color:#000} .c-bud{background:var(--c-bud);color:#000} .c-wood{background:var(--c-wood);color:#fff} .c-water{background:var(--c-water);color:#000} .c-fire{background:var(--c-fire);color:#fff} .c-leaf{background:var(--c-leaf);color:#fff} .c-pollen{background:var(--c-pollen);color:#000} .c-moon{background:var(--c-moon);color:#fff}
+
+        /* 弹窗系统 */
+        .overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.95); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); z-index: 200; display: none; justify-content: center; align-items: center; }
+        .overlay.active { display: flex; }
+        .modal { background: #1a1a1a; border: 1px solid #333; padding: 25px; border-radius: 24px; width: 85%; max-width: 400px; max-height: 80vh; overflow-y: auto; position: relative; }
+        .close-btn { position: absolute; top: 15px; right: 15px; background: none; border: none; color: #666; font-size: 20px; }
+
+        /* 灵石阵 */
+        .rune-altar { width: 100%; height: 300px; position: relative; background: radial-gradient(circle, rgba(255,255,255,0.05), transparent); border-radius: 50%; margin-bottom: 20px; overflow: hidden; }
+        .rune { position: absolute; padding: 6px 12px; border-radius: 15px; font-size: 12px; background: rgba(0,0,0,0.6); border: 1px solid #fff; color: #fff; white-space: nowrap; will-change: transform; }
+        .rune.daily { border: 2px solid #FFD700; color: #FFD700; }
+        
+        /* 锁定层 (Mobile View: 只显示密钥) */
+        #mobile-key-card { display: none; background: rgba(118, 255, 3, 0.05); border: 1px solid rgba(118, 255, 3, 0.3); padding: 15px; border-radius: 16px; margin-bottom: 15px; justify-content: space-between; align-items: center; }
+        
+        .lock-btn {
+            background: none; border: none; color: var(--text-dim); cursor: pointer; font-size: 14px;
+            margin-left: 15px; padding: 5px; border-radius: 50%; transition: 0.2s;
+        }
+        .lock-btn:hover { color: #fff; background: rgba(255,255,255,0.1); transform: scale(1.1); }
+
+        /* 动画 */
+        @keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    </style>
+</head>
+<body>
+
+<!-- iOS 提示条 -->
+<div id="install-guide">
+    <div style="color:#fff; font-weight:bold; margin-bottom:5px;">📲 提示</div>
+    <div style="color:#ccc; font-size:12px;">如果想数据不丢失，请将此文件上传到任意静态网站托管(如tiiny.host)，然后通过 Safari 添加到主屏幕。直接在文件APP打开时数据可能无法保存。</div>
+    <div class="guide-close" onclick="document.getElementById('install-guide').classList.remove('show')">×</div>
+</div>
+
+<div class="container">
+    <!-- 顶部灵动岛 -->
+    <div class="top-bar">
+        <div class="island">
+            <div style="display:flex; align-items:center;">
+                <div class="live-dot"></div>
+                <span style="font-weight:600; font-size:14px;">QUANT LIFE</span>
+                <button class="lock-btn" onclick="askForLock()">🔒</button>
+            </div>
+            <span id="clock" style="font-family:monospace; color:var(--text-dim);">00:00</span>
+        </div>
+    </div>
+
+    <!-- 手机端特供：密钥卡片 -->
+    <div class="mobile-only" style="width:100%">
+        <div id="mobile-key-card" style="display:flex;">
+            <div style="color:var(--c-bud); font-size:12px;">🔑 解锁电脑密钥</div>
+            <div id="key-val" style="font-family:monospace; font-size:20px; font-weight:bold; color:#fff;">----</div>
+        </div>
+    </div>
+
+    <!-- 左侧：数据面板 -->
+    <div class="card left-panel">
+        <div style="display:flex; justify-content:space-between; color:#fff; font-weight:bold;">
+            <span>📊 能量闭环</span>
+            <div class="status-dot" style="width:8px; height:8px; background:#333; border-radius:50%;"></div>
+        </div>
+        <div class="ring-box">
+            <svg class="ring-svg"><circle class="ring-bg" cx="70" cy="70" r="60"/><circle class="ring-val" id="ring-val" cx="70" cy="70" r="60"/></svg>
+            <div class="ring-text">
+                <div class="ring-num" id="input-h">0.0</div>
+                <div class="ring-label">Input / 8h</div>
+            </div>
+        </div>
+        <div id="stats-list" class="legend-list"></div>
+        <div style="margin-top:auto; display:flex; gap:10px;">
+            <button onclick="openModal('analysis-modal')" style="background:none; border:none; color:#666; flex:1; font-size:12px;">周报分析</button>
+            <button onclick="openModal('backup-modal')" style="background:none; border:none; color:#666; flex:1; font-size:12px;">数据备份</button>
+        </div>
+    </div>
+
+    <!-- 右侧：矩阵 -->
+    <div class="card right-panel">
+        <div class="grid-header">
+            <div style="font-weight:bold; color:#fff;">
+                <span id="mode-text">👁️ 观测模式</span>
+                <button onclick="toggleMode()" style="background:#333; border:none; color:#aaa; border-radius:10px; padding:2px 8px; font-size:10px; margin-left:5px;">切换</button>
+            </div>
+            <div class="date-display">
+                <span onclick="moveDate(-1)">◀</span> <span id="date-str">TODAY</span> <span onclick="moveDate(1)">▶</span>
+            </div>
+        </div>
+        <div class="grid" id="grid"></div>
+        <div style="text-align:center; margin-top:10px; font-size:10px; color:#555;">点击格子 · 记录时刻</div>
+    </div>
+
+    <!-- 底部：控制台 -->
+    <div class="card oracle-panel">
+        <button class="btn-base seed-btn" onclick="openModal('rune-modal')">🎒 灵石阵 <span id="todo-badge" style="background:#333; padding:1px 5px; border-radius:4px; font-size:10px; margin-left:5px;">0</span></button>
+        <button class="btn-base plan-btn" onclick="openModal('text-modal')">📜 简报</button>
+        <button class="btn-base nature-btn" onclick="natureCall()">🍃 共鸣</button>
+    </div>
+</div>
+
+<!-- 弹窗：灵石阵 -->
+<div id="rune-modal" class="overlay" onclick="closeModal('rune-modal')">
+    <div class="modal" onclick="event.stopPropagation()">
+        <button class="close-btn" onclick="closeModal('rune-modal')">×</button>
+        <h3 style="color:#fff; text-align:center;">灵石阵 (Runes)</h3>
+        
+        <div style="display:flex; flex-direction:column; gap:10px; margin-bottom:20px;">
+            <input type="text" id="rune-in" placeholder="输入任务..." style="background:transparent; border:none; border-bottom:1px solid #555; color:#fff; padding:10px; text-align:center; outline:none;">
+            <div style="display:flex; gap:10px;">
+                <button onclick="addRune('once')" style="flex:1; padding:8px; background:#333; border:none; color:#fff; border-radius:8px;">✨ 一次性</button>
+                <button onclick="addRune('daily')" style="flex:1; padding:8px; background:#333; border:1px solid #FFD700; color:#FFD700; border-radius:8px;">♾️ 每日做</button>
+            </div>
+        </div>
+
+        <div class="rune-altar" id="rune-container"></div>
+        <div style="text-align:center; font-size:10px; color:#555;">长按编辑 · 点击完成</div>
+    </div>
+</div>
+
+<!-- 弹窗：文字计划 -->
+<div id="text-modal" class="overlay" onclick="closeModal('text-modal')">
+    <div class="modal" onclick="event.stopPropagation()">
+        <button class="close-btn" onclick="closeModal('text-modal')">×</button>
+        <h3 style="color:#fff;">每日简报</h3>
+        <textarea id="text-plan" style="width:100%; height:300px; background:#111; color:#ccc; border:none; border-radius:10px; padding:15px; resize:none; outline:none;" oninput="saveText()"></textarea>
+    </div>
+</div>
+
+<!-- 弹窗：分析 -->
+<div id="analysis-modal" class="overlay" onclick="closeModal('analysis-modal')">
+    <div class="modal" onclick="event.stopPropagation()">
+        <button class="close-btn" onclick="closeModal('analysis-modal')">×</button>
+        <h3 style="color:#fff;">本周洞察</h3>
+        <div id="analysis-content" style="color:#ccc; font-size:13px; line-height:1.6;"></div>
+    </div>
+</div>
+
+<!-- 弹窗：种植 -->
+<div id="sel-modal" class="overlay" onclick="closeModal('sel-modal')">
+    <div class="modal" onclick="event.stopPropagation()" style="text-align:center;">
+        <div style="color:#888; font-size:12px; margin-bottom:15px;" id="range-info">选择时间段</div>
+        <div class="grid-select" id="sel-grid"></div>
+    </div>
+</div>
+
+<script>
+    // --- 自动生成 APP 图标 ---
+    (function generateIcon() {
+        const c = document.createElement('canvas'); c.width=180; c.height=180;
+        const x = c.getContext('2d');
+        x.fillStyle = '#111'; x.fillRect(0,0,180,180); // 黑底
+        x.fillStyle = '#76FF03'; x.font = 'bold 100px sans-serif'; x.textAlign='center'; x.textBaseline='middle';
+        x.fillText('Q', 90, 95); // 绿色Q
+        document.getElementById('dynamic-icon').href = c.toDataURL();
+    })();
+
+    // --- 核心逻辑 ---
+    const TYPES = { fruit: '#FFB300', bud: '#76FF03', wood: '#795548', water: '#29B6F6', fire: '#FF5252', leaf: '#009688', pollen: '#FFEA00', moon: '#7C4DFF', wither: '#607D8B' };
+    const STORAGE_PRE = 'v42_';
+    
+    // 安全的 Storage 封装 (防止iOS无痕模式报错)
+    const storage = {
+        get: (k) => { try{return localStorage.getItem(k)}catch(e){return null} },
+        set: (k,v) => { try{localStorage.setItem(k,v)}catch(e){} },
+        key: (i) => { try{return localStorage.key(i)}catch(e){return null} },
+        len: () => { try{return localStorage.length}catch(e){return 0} }
+    };
+
+    let state = { date: new Date(), dragging: false, start: -1, end: -1, mode: 'record', runes: [] };
+
+    function init() {
+        // iOS 安装引导
+        if (navigator.userAgent.match(/iPhone/i) && !window.navigator.standalone && !document.location.href.startsWith('file:')) {
+            setTimeout(() => document.getElementById('install-guide').classList.add('show'), 2000);
+        }
+        
+        // 生成密钥
+        const seed = new Date().toDateString().split('').reduce((a,c)=>a+c.charCodeAt(0),0);
+        const code = Math.floor((Math.sin(seed)+1)*4500+1000).toString().substring(0,4);
+        document.getElementById('key-val').innerText = code;
+
+        createGrid(); createSelector(); loadDate(new Date()); updateRunes();
+        setInterval(tick, 1000); tick();
+        setInterval(physicsLoop, 50);
+        
+        // 全局触摸释放
+        document.addEventListener('touchend', ()=>{ if(state.dragging){state.dragging=false;openSel();} });
+        document.addEventListener('mouseup', ()=>{ if(state.dragging){state.dragging=false;openSel();} });
+    }
+
+    function createGrid() {
+        const g = document.getElementById('grid'); g.innerHTML = '';
+        for(let i=0; i<48; i++) {
+            const d = document.createElement('div'); d.className = 'soil'; d.id = `c-${i}`;
+            d.innerText = `${Math.floor(i/2)}:${(i%2)*30===0?'00':'30'}`;
+            // 触摸事件 (修复移动端滑动)
+            d.ontouchstart = (e) => { e.preventDefault(); state.dragging=true; state.start=i; state.end=i; renderSel(); };
+            d.ontouchmove = (e) => { 
+                e.preventDefault(); 
+                const touch = e.touches[0];
+                const t = document.elementFromPoint(touch.clientX, touch.clientY);
+                if(t && t.id.startsWith('c-')) { state.end = parseInt(t.id.split('-')[1]); renderSel(); }
+            };
+            d.onmousedown = () => { state.dragging=true; state.start=i; state.end=i; renderSel(); };
+            d.onmouseenter = () => { if(state.dragging){ state.end=i; renderSel(); } };
+            g.appendChild(d);
+        }
+    }
+
+    function renderSel() {
+        document.querySelectorAll('.selecting').forEach(e=>e.classList.remove('selecting'));
+        const s = Math.min(state.start, state.end), e = Math.max(state.start, state.end);
+        for(let i=s; i<=e; i++) document.getElementById(`c-${i}`).classList.add('selecting');
+    }
+
+    function createSelector() {
+        const g = document.getElementById('sel-grid');
+        Object.keys(TYPES).forEach(k => {
+            g.innerHTML += `<div class="plant-btn" onclick="plant('${k}')" style="color:${TYPES[k]}">
+                <div style="font-size:20px; font-weight:bold;">${k.toUpperCase()}</div>
+            </div>`;
+        });
+        g.innerHTML += `<div class="plant-btn" onclick="plant('empty')">清除</div>`;
+    }
+
+    function openSel() { 
+        document.getElementById('range-info').innerText = `${state.mode==='plan'?'规划':'记录'}: ${Math.abs(state.end-state.start)+1}格`;
+        openModal('sel-modal'); 
+    }
+
+    function plant(type) {
+        const s = Math.min(state.start, state.end), e = Math.max(state.start, state.end);
+        const key = state.mode==='plan' ? `plan_${state.date.toDateString()}` : state.date.toDateString();
+        const data = getData(key);
+        for(let i=s; i<=e; i++) data[i] = type;
+        saveData(key, data);
+        closeModal('sel-modal');
+        document.querySelectorAll('.selecting').forEach(e=>e.classList.remove('selecting'));
+    }
+
+    function getData(key) { return JSON.parse(storage.get(STORAGE_PRE+key) || '[]'); }
+    function saveData(key, data) { 
+        storage.set(STORAGE_PRE+key, JSON.stringify(data)); 
+        loadDate(state.date); 
+    }
+
+    function loadDate(d) {
+        state.date = d;
+        document.getElementById('date-str').innerText = d.toDateString()===new Date().toDateString()?'TODAY':d.getMonth()+1+'/'+d.getDate();
+        
+        const real = getData(d.toDateString()) || Array(48).fill('empty');
+        const plan = getData('plan_'+d.toDateString()) || Array(48).fill('empty');
+        
+        let bud=0, stats={}; Object.keys(TYPES).forEach(k=>stats[k]=0);
+        
+        for(let i=0; i<48; i++) {
+            const el = document.getElementById(`c-${i}`); el.className = 'soil'; el.style = '';
+            
+            if(real[i]!=='empty') {
+                el.style.background = TYPES[real[i]]; el.style.color = '#000';
+                if(plan[i]===real[i]) el.classList.add('resonance');
+                if(real[i]==='bud') bud+=0.5;
+                stats[real[i]]+=0.5;
+            } else if(plan[i]!=='empty') {
+                el.classList.add('plan-ghost');
+                el.style.color = TYPES[plan[i]];
+                el.style.borderColor = TYPES[plan[i]];
+            }
+        }
+        
+        document.getElementById('input-h').innerText = bud.toFixed(1);
+        document.getElementById('ring-val').style.strokeDashoffset = 440 - (440 * Math.min(1, bud/8));
+        
+        const list = document.getElementById('stats-list'); list.innerHTML='';
+        Object.keys(stats).forEach(k=>{
+            if(stats[k]>0) list.innerHTML += `<div class="legend-item" style="color:${TYPES[k]}"><span>${k.toUpperCase()}</span> <span style="margin-left:auto">${stats[k]}h</span></div>`;
+        });
+        
+        document.getElementById('text-plan').value = storage.get(STORAGE_PRE+'txt_'+d.toDateString()) || '';
+    }
+
+    // --- 灵石阵 ---
+    function updateRunes() {
+        const todos = JSON.parse(storage.get(STORAGE_PRE+'todos')||'[]');
+        // 初始化物理位置
+        state.runes = todos.map(t => ({...t, x:Math.random()*200, y:Math.random()*200, vx:(Math.random()-0.5), vy:(Math.random()-0.5)}));
+        document.getElementById('todo-badge').innerText = todos.filter(t=>t.type!=='daily'||!isDone(t)).length;
+        renderRunesDOM();
+    }
+    function isDone(t) { return t.lastDone && new Date(t.lastDone).toDateString()===new Date().toDateString(); }
+    function renderRunesDOM() {
+        const c = document.getElementById('rune-container'); c.innerHTML='';
+        state.runes.forEach((r, i) => {
+            if(r.type==='daily' && isDone(r)) return; 
+            const d = document.createElement('div');
+            d.className = 'rune ' + (r.type==='daily'?'daily':'');
+            d.innerText = r.text;
+            d.id = `rune-${i}`;
+            d.onclick = () => finishRune(i);
+            c.appendChild(d);
+        });
+    }
+    function physicsLoop() {
+        if(document.getElementById('rune-modal').style.display !== 'flex') return;
+        state.runes.forEach((r,i) => {
+            r.x += r.vx; r.y += r.vy;
+            if(r.x<0 || r.x>250) r.vx*=-1; if(r.y<0 || r.y>250) r.vy*=-1;
+            const el = document.getElementById(`rune-${i}`);
+            if(el) el.style.transform = `translate(${r.x}px, ${r.y}px)`;
+        });
+    }
+    function addRune(type) {
+        const txt = document.getElementById('rune-in').value; if(!txt)return;
+        const todos = JSON.parse(storage.get(STORAGE_PRE+'todos')||'[]');
+        todos.push({text:txt, type:type, created:Date.now()});
+        storage.set(STORAGE_PRE+'todos', JSON.stringify(todos));
+        updateRunes(); document.getElementById('rune-in').value='';
+    }
+    function finishRune(idx) {
+        const todos = JSON.parse(storage.get(STORAGE_PRE+'todos')||'[]');
+        if(todos[idx].type === 'daily') todos[idx].lastDone = Date.now();
+        else todos.splice(idx, 1);
+        storage.set(STORAGE_PRE+'todos', JSON.stringify(todos));
+        updateRunes();
+    }
+    
+    // --- 锁定系统(伪) ---
+    function askForLock() { alert("🔒 已发送锁定信号至服务器...\n(本地演示版：此处仅做动画演示)"); }
+
+    // --- 通用 ---
+    function toggleMode() { state.mode = state.mode==='record'?'plan':'record'; document.getElementById('mode-text').innerText = state.mode==='plan'?'🖊️ 规划模式':'👁️ 观测模式'; document.body.classList.toggle('planning-mode'); }
+    function moveDate(d) { state.date.setDate(state.date.getDate()+d); loadDate(state.date); }
+    function tick() { const n=new Date(); document.getElementById('clock').innerText=`${n.getHours()}:${n.getMinutes()<10?'0':''}${n.getMinutes()}`; }
+    function openModal(id) { document.getElementById(id).classList.add('active'); if(id==='rune-modal') renderRunesDOM(); if(id==='analysis-modal') genAnalysis(); }
+    function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+    function saveText() { storage.set(STORAGE_PRE+'txt_'+state.date.toDateString(), document.getElementById('text-plan').value); }
+    function natureCall() { alert("🍃 保持专注"); }
+    
+    function genAnalysis() {
+        const box = document.getElementById('analysis-content');
+        let total=0, bud=0;
+        for(let i=0; i<7; i++) {
+            const d = new Date(); d.setDate(d.getDate()-i);
+            const data = getData(d.toDateString())||[];
+            data.forEach(t=>{ if(t!=='empty'){ total+=0.5; if(t==='bud')bud+=0.5; } });
+        }
+        box.innerHTML = `过去7天共专注 <b>${total}</b> 小时。<br>其中输入(学习) <b>${bud}</b> 小时。<br><br>建议：${total<10?'🌲 种一棵树最好的时间是现在。':'✨ 保持这个节奏，你很棒。'}`;
+    }
+
+    init();
+</script>
+</body>
+</html>
