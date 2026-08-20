@@ -1,0 +1,11 @@
+pandas>=2.2,<3
+numpy>=1.26,<3
+requests>=2.31
+urllib3>=2.2
+scikit-learn>=1.5
+pyarrow>=17
+xlrd>=2.0
+polars>=1.8
+httpx>=0.27
+certifi>=2024.7
+git+https://github.com/rootSunc/CNEquity.git@a18ee0484dfb0801650175471724def3228b8a17
