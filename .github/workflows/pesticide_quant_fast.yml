@@ -1,0 +1,83 @@
+name: pesticide-quant-fast
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pesticide_quant/**'
+      - '.github/workflows/pesticide_quant_fast.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fast-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pesticide_quant/requirements.txt
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesticide_quant/requirements.txt
+      - name: Bootstrap and official membership
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p work logs astock_data
+          python pesticide_quant/bootstrap_db.py --db work/pesticide.sqlite 2>&1 | tee logs/bootstrap.log
+          python pesticide_quant/membership_official.py --db work/pesticide.sqlite --audit-csv work/membership_audit.csv --export-csv work/pesticide_membership_history.csv 2>&1 | tee logs/membership.log
+          python pesticide_quant/export_universe.py --db work/pesticide.sqlite --out work/universe.csv 2>&1 | tee logs/universe.log
+      - name: Download AStock qfq market files
+        shell: bash
+        run: |
+          set -o pipefail
+          for f in kline_000.parquet kline_002.parquet kline_300.parquet kline_600.parquet; do
+            curl -L --fail --retry 3 --retry-delay 2 "https://raw.githubusercontent.com/newbiestring-lang/astock/main/$f" -o "astock_data/$f"
+          done
+          ls -lh astock_data | tee logs/astock_download.log
+      - name: Import AStock market
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/fallback_data.py --db work/pesticide.sqlite --universe-csv work/universe.csv --mode market --data-dir astock_data 2>&1 | tee logs/market.log
+      - name: Import GitHub financial archive
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/fallback_data.py --db work/pesticide.sqlite --universe-csv work/universe.csv --mode finance 2>&1 | tee logs/finance.log
+      - name: Run PIT walk-forward diagnostic
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest.py --db work/pesticide.sqlite --outdir work/backtest --allow-partial 2>&1 | tee logs/backtest.log
+      - name: Status
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,sqlite3,pathlib
+          con=sqlite3.connect('work/pesticide.sqlite')
+          counts={t:con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ['industry_membership_history','market_daily','financial_quarterly']}
+          jobs=con.execute('SELECT job_id,status,target_entities,loaded_entities,loaded_rows,min_date,max_date,note FROM ingestion_job ORDER BY job_id').fetchall();con.close()
+          d={'counts':counts,'jobs':jobs}
+          p=pathlib.Path('work/backtest/backtest_summary.json')
+          if p.exists():d['backtest']=json.loads(p.read_text(encoding='utf-8'))
+          pathlib.Path('work/fast_status.json').write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(d,ensure_ascii=False,indent=2))
+          PY
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pesticide-quant-fast-${{ github.run_number }}
+          path: |
+            work/**
+            logs/**
+          retention-days: 30
