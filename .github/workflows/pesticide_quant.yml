@@ -1,0 +1,214 @@
+name: pesticide-quant-backtest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'pesticide_quant/**'
+      - '.github/workflows/pesticide_quant.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pesticide_quant/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesticide_quant/requirements.txt
+
+      - name: Initialize database
+        run: |
+          mkdir -p work logs
+          python pesticide_quant/bootstrap_db.py --db work/pesticide.sqlite 2>&1 | tee logs/bootstrap.log
+
+      - name: Build official Shenwan PIT membership
+        id: membership
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/membership_official.py \
+            --db work/pesticide.sqlite \
+            --audit-csv work/membership_audit.csv \
+            --export-csv work/pesticide_membership_history.csv \
+            2>&1 | tee logs/membership.log
+
+      - name: Export market/finance universe
+        if: always()
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/export_universe.py \
+            --db work/pesticide.sqlite \
+            --out work/universe.csv \
+            2>&1 | tee logs/universe.log
+
+      - name: Fetch Eastmoney market history
+        id: market
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/live_data.py \
+            --db work/pesticide.sqlite \
+            --universe-csv work/universe.csv \
+            --market-only \
+            2>&1 | tee logs/market_live.log
+
+      - name: Check market coverage
+        id: market_coverage
+        if: always()
+        run: |
+          python - <<'PY'
+          import csv, os, sqlite3, json
+          with open('work/universe.csv', encoding='utf-8-sig') as f:
+              target={r['code'] for r in csv.DictReader(f)}
+          con=sqlite3.connect('work/pesticide.sqlite')
+          have={r[0] for r in con.execute('SELECT DISTINCT code FROM market_daily WHERE close_qfq IS NOT NULL')}
+          con.close()
+          missing=sorted(target-have)
+          result={'target':len(target),'have':len(have),'missing':missing}
+          print(json.dumps(result,ensure_ascii=False))
+          with open('work/market_coverage_pre_fallback.json','w',encoding='utf-8') as f: json.dump(result,f,ensure_ascii=False,indent=2)
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f: f.write('need_fallback=' + ('true' if missing else 'false') + '\n')
+          PY
+
+      - name: Download AStock fallback dataset
+        if: steps.market_coverage.outputs.need_fallback == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p astock_data
+          for f in kline_000.parquet kline_002.parquet kline_300.parquet kline_600.parquet; do
+            curl -L --fail --retry 3 --retry-delay 2 \
+              "https://raw.githubusercontent.com/newbiestring-lang/astock/main/$f" \
+              -o "astock_data/$f" || true
+          done
+          ls -lh astock_data | tee logs/astock_download.log
+
+      - name: Import AStock fallback market data
+        if: steps.market_coverage.outputs.need_fallback == 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/fallback_data.py \
+            --db work/pesticide.sqlite \
+            --universe-csv work/universe.csv \
+            --mode market \
+            --data-dir astock_data \
+            2>&1 | tee logs/market_fallback.log
+
+      - name: Fetch Eastmoney PIT financial history
+        id: finance
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/live_data.py \
+            --db work/pesticide.sqlite \
+            --universe-csv work/universe.csv \
+            --finance-only \
+            2>&1 | tee logs/finance_live.log
+
+      - name: GitHub financial archive fallback
+        if: steps.finance.outcome != 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/fallback_data.py \
+            --db work/pesticide.sqlite \
+            --universe-csv work/universe.csv \
+            --mode finance \
+            2>&1 | tee logs/finance_fallback.log
+
+      - name: Run formal PIT walk-forward backtest
+        id: formal
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest.py \
+            --db work/pesticide.sqlite \
+            --outdir work/backtest_formal \
+            2>&1 | tee logs/backtest_formal.log
+
+      - name: Run partial diagnostic backtest if formal gate fails
+        if: steps.formal.outcome != 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest.py \
+            --db work/pesticide.sqlite \
+            --outdir work/backtest_partial \
+            --allow-partial \
+            2>&1 | tee logs/backtest_partial.log
+
+      - name: Write pipeline status
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, sqlite3, pathlib
+          db='work/pesticide.sqlite'
+          con=sqlite3.connect(db)
+          counts={}
+          for t in ['industry_membership_history','market_daily','financial_quarterly','capital_flow_daily','industry_product_daily']:
+              try: counts[t]=con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0]
+              except Exception as e: counts[t]=repr(e)
+          jobs=con.execute('SELECT job_id,status,target_entities,loaded_entities,loaded_rows,min_date,max_date,note FROM ingestion_job ORDER BY job_id').fetchall()
+          con.close()
+          status={'counts':counts,'jobs':jobs}
+          for name in ['backtest_formal/backtest_summary.json','backtest_partial/backtest_summary.json','backtest_formal/gate.json','backtest_partial/gate.json']:
+              p=pathlib.Path('work')/name
+              if p.exists():
+                  try: status[name]=json.loads(p.read_text(encoding='utf-8'))
+                  except Exception: pass
+          pathlib.Path('work/pipeline_status.json').write_text(json.dumps(status,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(status,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Job summary
+        if: always()
+        run: |
+          echo '# Pesticide Quant Pipeline' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Official membership step: `${{ steps.membership.outcome }}`' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Eastmoney market step: `${{ steps.market.outcome }}`' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Eastmoney finance step: `${{ steps.finance.outcome }}`' >> "$GITHUB_STEP_SUMMARY"
+          echo '- Formal backtest step: `${{ steps.formal.outcome }}`' >> "$GITHUB_STEP_SUMMARY"
+          echo '' >> "$GITHUB_STEP_SUMMARY"
+          if [ -f work/backtest_formal/backtest_summary.json ]; then
+            echo '## Formal result' >> "$GITHUB_STEP_SUMMARY"
+            cat work/backtest_formal/backtest_summary.json >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f work/backtest_partial/backtest_summary.json ]; then
+            echo '## Partial diagnostic result' >> "$GITHUB_STEP_SUMMARY"
+            cat work/backtest_partial/backtest_summary.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pesticide-quant-results-${{ github.run_number }}
+          path: |
+            work/**
+            logs/**
+          if-no-files-found: warn
+          retention-days: 30
