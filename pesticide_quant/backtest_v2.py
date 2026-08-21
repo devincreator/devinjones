@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""PIT walk-forward backtest v2 with overlap-aware production gate."""
+"""PIT walk-forward backtest v2 with interval-level production gate."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,10 @@ import pandas as pd
 import backtest as base
 
 ACCEPTED_J003 = {"LOADED", "LOADED_OFFICIAL_WITH_SNAPSHOT_DIFF"}
+
+
+def table_exists(con, name):
+    return con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()[0] > 0
 
 
 def gate_v2(con, m, mem, fin):
@@ -34,9 +38,17 @@ def gate_v2(con, m, mem, fin):
     required_codes = set(required["code"].astype(str))
     market_codes = set(m["code"].astype(str))
     finance_codes = set(fin["code"].astype(str)) if not fin.empty else set()
-
     missing_market = sorted(required_codes - market_codes)
     missing_finance = sorted(required_codes - finance_codes)
+
+    interval_audit_exists = table_exists(con, "market_interval_coverage")
+    failed_interval_codes = []
+    interval_rows = 0
+    if interval_audit_exists:
+        interval_rows = con.execute("SELECT COUNT(*) FROM market_interval_coverage").fetchone()[0]
+        failed_interval_codes = [r[0] for r in con.execute(
+            "SELECT DISTINCT code FROM market_interval_coverage WHERE coverage_ok=0 ORDER BY code"
+        )]
 
     g = {
         "j003_status": j003,
@@ -52,6 +64,9 @@ def gate_v2(con, m, mem, fin):
         "required_membership_codes_in_market_window": len(required_codes),
         "missing_required_market_codes": missing_market,
         "missing_required_finance_codes": missing_finance,
+        "interval_audit_exists": interval_audit_exists,
+        "interval_audit_rows": int(interval_rows),
+        "failed_interval_coverage_codes": failed_interval_codes,
     }
     g["formal_ok"] = bool(
         j003 in ACCEPTED_J003
@@ -60,6 +75,9 @@ def gate_v2(con, m, mem, fin):
         and len(required_codes) > 0
         and not missing_market
         and not missing_finance
+        and interval_audit_exists
+        and interval_rows > 0
+        and not failed_interval_codes
     )
     return g
 
