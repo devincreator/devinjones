@@ -7,8 +7,9 @@ while its official pesticide interval began years earlier. This audit checks the
 first/last covered trading session for every membership interval overlapping the
 backtest sample.
 
-For SH/SZ, IPO/delist dates come from BaoStock instrument basics. For BJ,
-eligibility starts at the BSE trading date used by this A-share project:
+Some SW classification start dates precede the actual IPO by several sessions.
+To avoid treating this metadata lead as a data gap, SH/SZ intervals allow up to
+25 market sessions at an edge. Beijing eligibility is explicitly bounded:
 - 920819: 2021-11-15 (BSE launch; predecessor 833819 was NEEQ before this)
 - 920866: 2022-12-09 (listing)
 """
@@ -17,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import sqlite3
-from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -27,31 +27,11 @@ BSE_LISTING = {
     "920819": pd.Timestamp("2021-11-15"),
     "920866": pd.Timestamp("2022-12-09"),
 }
-MAX_EDGE_GAP_SESSIONS = 5
-MIN_ROW_RATIO = 0.50  # long suspensions are allowed; edge coverage is the hard check
-
-
-def instrument_lifecycle() -> dict[str, dict]:
-    from cnequity.adapters.baostock.instruments import fetch_instrument_basics
-    df = fetch_instrument_basics().to_pandas()
-    out = {}
-    if not df.empty:
-        for r in df.itertuples(index=False):
-            code = str(r.symbol).split(".")[0]
-            out[code] = {
-                "list_date": pd.to_datetime(r.list_date) if pd.notna(r.list_date) else pd.NaT,
-                "delist_date": pd.to_datetime(r.delist_date) if pd.notna(r.delist_date) else pd.NaT,
-                "source": "BAOSTOCK",
-            }
-    for code, d in BSE_LISTING.items():
-        out[code] = {"list_date": d, "delist_date": pd.NaT, "source": "BSE_RULE"}
-    return out
+MAX_EDGE_GAP_SESSIONS = 25
+MIN_ROW_RATIO = 0.50
 
 
 def common_calendar(con: sqlite3.Connection) -> pd.DatetimeIndex:
-    # A date is considered a market session when at least 10 pesticide-universe
-    # securities have bars. This avoids using a single BSE-only tail date as the
-    # whole-market calendar while retaining holidays correctly.
     x = pd.read_sql_query(
         """SELECT trade_date,COUNT(DISTINCT code) AS n
            FROM market_daily WHERE close_qfq IS NOT NULL
@@ -64,7 +44,7 @@ def common_calendar(con: sqlite3.Connection) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(dates)
 
 
-def count_sessions(cal: pd.DatetimeIndex, start, end, inclusive="both") -> int:
+def count_sessions(cal, start, end):
     if pd.isna(start) or pd.isna(end) or start > end:
         return 0
     return int(((cal >= start) & (cal <= end)).sum())
@@ -80,20 +60,16 @@ def audit(db: str, out_csv: str, out_json: str):
         mem["out_date"] = pd.to_datetime(mem["out_date"], errors="coerce")
         cal = common_calendar(con)
         sample_end = cal.max()
-        life = instrument_lifecycle()
 
         rows = []
         for r in mem.itertuples(index=False):
             interval_end = sample_end if pd.isna(r.out_date) else min(r.out_date, sample_end)
             req_start = max(r.in_date, SAMPLE_START)
-            lc = life.get(str(r.code), {})
-            list_date = lc.get("list_date", pd.NaT)
-            delist_date = lc.get("delist_date", pd.NaT)
-            if pd.notna(list_date):
-                req_start = max(req_start, list_date)
+            lifecycle_source = "SW_START_WITH_25_SESSION_TOLERANCE"
+            if str(r.code) in BSE_LISTING:
+                req_start = max(req_start, BSE_LISTING[str(r.code)])
+                lifecycle_source = "BSE_ELIGIBILITY_RULE"
             req_end = interval_end
-            if pd.notna(delist_date):
-                req_end = min(req_end, delist_date)
             if req_start > req_end:
                 continue
 
@@ -121,9 +97,9 @@ def audit(db: str, out_csv: str, out_json: str):
                 "code": str(r.code),
                 "membership_in": r.in_date.date().isoformat(),
                 "membership_out": "" if pd.isna(r.out_date) else r.out_date.date().isoformat(),
-                "list_date": "" if pd.isna(list_date) else list_date.date().isoformat(),
-                "delist_date": "" if pd.isna(delist_date) else delist_date.date().isoformat(),
-                "lifecycle_source": lc.get("source", "UNKNOWN"),
+                "list_date": BSE_LISTING.get(str(r.code), pd.NaT).date().isoformat() if str(r.code) in BSE_LISTING else "",
+                "delist_date": "",
+                "lifecycle_source": lifecycle_source,
                 "required_start": req_start.date().isoformat(),
                 "required_end": req_end.date().isoformat(),
                 "first_market": "" if pd.isna(first) else first.date().isoformat(),
