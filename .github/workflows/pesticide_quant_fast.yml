@@ -12,9 +12,9 @@ permissions:
   contents: read
 
 jobs:
-  fast-backtest:
+  formal-tech-fin:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -28,37 +28,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r pesticide_quant/requirements.txt
 
-      - name: Bootstrap database
+      - name: Bootstrap
         shell: bash
         run: |
           set -o pipefail
           mkdir -p work logs astock_data
           python pesticide_quant/bootstrap_db.py --db work/pesticide.sqlite 2>&1 | tee logs/bootstrap.log
 
-      - name: Build official Shenwan PIT membership
-        id: membership
-        continue-on-error: true
+      - name: Official Shenwan PIT membership v2
         shell: bash
         run: |
           set -o pipefail
-          python pesticide_quant/membership_official.py \
+          python pesticide_quant/membership_official_v2.py \
             --db work/pesticide.sqlite \
             --audit-csv work/membership_audit.csv \
             --export-csv work/pesticide_membership_history.csv \
-            2>&1 | tee logs/membership.log
-
-      - name: Export official history plus current snapshot universe
-        if: always()
-        shell: bash
-        run: |
-          set -o pipefail
+            2>&1 | tee logs/membership_v2.log
           python pesticide_quant/export_universe.py \
             --db work/pesticide.sqlite \
             --out work/universe.csv \
             2>&1 | tee logs/universe.log
 
-      - name: Download AStock qfq market files
-        continue-on-error: true
+      - name: Download AStock qfq market
         shell: bash
         run: |
           set -o pipefail
@@ -70,7 +61,6 @@ jobs:
           ls -lh astock_data | tee logs/astock_download.log
 
       - name: Import AStock market
-        continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
@@ -79,9 +69,30 @@ jobs:
             --universe-csv work/universe.csv \
             --mode market \
             --data-dir astock_data \
-            2>&1 | tee logs/market.log
+            2>&1 | tee logs/market_astock.log
 
-      - name: Import GitHub financial archive
+      - name: Fill BSE market from Sina
+        id: bse
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/bse_sina.py --db work/pesticide.sqlite 2>&1 | tee logs/market_bse_sina.log
+
+      - name: Fetch PIT financials from Eastmoney
+        id: finance
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/live_data.py \
+            --db work/pesticide.sqlite \
+            --universe-csv work/universe.csv \
+            --finance-only \
+            2>&1 | tee logs/finance_live.log
+
+      - name: Finance GitHub fallback if needed
+        if: steps.finance.outcome != 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -90,38 +101,45 @@ jobs:
             --db work/pesticide.sqlite \
             --universe-csv work/universe.csv \
             --mode finance \
-            2>&1 | tee logs/finance.log
+            2>&1 | tee logs/finance_fallback.log
 
-      - name: Run PIT walk-forward diagnostic
-        id: backtest
+      - name: Run formal TECH+FIN walk-forward
+        id: formal
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          python pesticide_quant/backtest.py \
+          python pesticide_quant/backtest_v2.py \
             --db work/pesticide.sqlite \
-            --outdir work/backtest \
+            --outdir work/backtest_formal_v2 \
+            2>&1 | tee logs/backtest_formal_v2.log
+
+      - name: Run partial diagnostic if formal gate fails
+        if: steps.formal.outcome != 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest_v2.py \
+            --db work/pesticide.sqlite \
+            --outdir work/backtest_partial_v2 \
             --allow-partial \
-            2>&1 | tee logs/backtest.log
+            2>&1 | tee logs/backtest_partial_v2.log
 
       - name: Status
         if: always()
         run: |
           python - <<'PY'
-          import json,sqlite3,pathlib
+          import json, sqlite3, pathlib
           con=sqlite3.connect('work/pesticide.sqlite')
-          counts={t:con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ['industry_membership_history','market_daily','financial_quarterly']}
+          counts={t:con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ['industry_membership_history','market_daily','financial_quarterly','capital_flow_daily','industry_product_daily']}
           jobs=con.execute('SELECT job_id,status,target_entities,loaded_entities,loaded_rows,min_date,max_date,note FROM ingestion_job ORDER BY job_id').fetchall()
           con.close()
-          d={'counts':counts,'jobs':jobs,'membership_step':'${{ steps.membership.outcome }}','backtest_step':'${{ steps.backtest.outcome }}'}
-          for rel in ['membership_audit.csv','pesticide_membership_history.csv','universe.csv','backtest/gate.json','backtest/backtest_summary.json']:
+          d={'counts':counts,'jobs':jobs,'bse_step':'${{ steps.bse.outcome }}','finance_step':'${{ steps.finance.outcome }}','formal_step':'${{ steps.formal.outcome }}'}
+          for rel in ['backtest_formal_v2/gate.json','backtest_formal_v2/backtest_summary.json','backtest_partial_v2/gate.json','backtest_partial_v2/backtest_summary.json']:
               p=pathlib.Path('work')/rel
-              if p.exists():
-                  if p.suffix=='.json':
-                      try:d[rel]=json.loads(p.read_text(encoding='utf-8'))
-                      except Exception:pass
-                  else:d[rel+'_exists']=True
-          pathlib.Path('work/fast_status.json').write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
+              if p.exists(): d[rel]=json.loads(p.read_text(encoding='utf-8'))
+          pathlib.Path('work/pipeline_status_v2.json').write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
           print(json.dumps(d,ensure_ascii=False,indent=2))
           PY
 
