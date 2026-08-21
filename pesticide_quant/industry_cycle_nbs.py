@@ -6,12 +6,12 @@ Source: 国家统计局《流通领域重要生产资料市场价格变动情况
 Product: 农药（草甘膦，95%原药）
 
 PIT rule: ``industry_product_daily.date`` is the PUBLICATION date, never the
-observation period.  The model may only see a 旬度 price after NBS published it.
+observation period. The model may only see a 旬度 price after NBS published it.
 
-NBS's site-search endpoint is not reliable for historical release discovery.
-This loader therefore walks the official ``/sj/zxfb/`` release-index pages,
-collects matching release articles, and then parses publication date + price
-from the official article itself.
+NBS's site-search endpoint is not reliable for historical discovery, so this
+loader walks the official ``/sj/zxfb/`` release-index pages. NBS responses can
+omit a charset in Content-Type; decoding ``requests.Response.text`` may then
+produce mojibake. All pages are therefore decoded from bytes explicitly.
 """
 from __future__ import annotations
 
@@ -55,14 +55,28 @@ def session():
     return s
 
 
+def response_text(r):
+    """Decode NBS HTML deterministically; charset headers are not always usable."""
+    b = r.content
+    for enc in ("utf-8", "gb18030"):
+        try:
+            t = b.decode(enc)
+            # A successful codec decode is not enough; require recognizable NBS text.
+            if "国家统计局" in t or "数据发布" in t or TITLE_KEY in t:
+                return t
+        except UnicodeDecodeError:
+            pass
+    enc = r.apparent_encoding or r.encoding or "utf-8"
+    return b.decode(enc, errors="replace")
+
+
 def parse_period_from_title(title: str):
     m = re.search(r"(20\d{2})年\s*(\d{1,2})月\s*(上旬|中旬|下旬).*流通领域重要生产资料市场价格变动情况", title)
     if not m:
         return None
     y, mo, part = int(m.group(1)), int(m.group(2)), m.group(3)
     day = {"上旬": 10, "中旬": 20, "下旬": calendar.monthrange(y, mo)[1]}[part]
-    period_end = dt.date(y, mo, day)
-    return f"{y}-{mo:02d}-{part}", period_end
+    return f"{y}-{mo:02d}-{part}", dt.date(y, mo, day)
 
 
 def parse_date_any(text: str):
@@ -84,12 +98,10 @@ def index_url(page: int):
 
 
 def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
-    """Return period-keyed release links from official NBS data-release indexes."""
     found = {}
     seen_urls = set()
     old_enough_pages = 0
     empty_pages = 0
-
     for page in range(max_pages):
         u = index_url(page)
         try:
@@ -97,13 +109,14 @@ def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
             if r.status_code == 404:
                 break
             r.raise_for_status()
+            html = response_text(r)
         except Exception as exc:
             print("NBS_INDEX_ERR", page, u, repr(exc))
             if page == 0:
                 raise
             continue
 
-        soup = BeautifulSoup(r.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
         page_hits = 0
         page_dates = []
         for a in soup.find_all("a", href=True):
@@ -119,39 +132,27 @@ def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
                 continue
             seen_urls.add(article)
             page_hits += 1
-
             container_text = " ".join((a.parent or a).stripped_strings)
             listed_date = parse_date_any(container_text)
             if listed_date:
                 page_dates.append(listed_date)
-
             if start <= period_end <= end:
                 found[period] = {
-                    "period": period,
-                    "period_end": period_end,
-                    "title": title,
-                    "url": article,
-                    "listed_date": listed_date,
+                    "period": period, "period_end": period_end, "title": title,
+                    "url": article, "listed_date": listed_date,
                 }
-
-        print("NBS_INDEX", page, "hits", page_hits, "total_periods", len(found))
-        if page_hits == 0:
-            empty_pages += 1
-        else:
-            empty_pages = 0
-
-        # Index is newest -> oldest. Once an index page itself is older than the
-        # requested start by a buffer, one more old page is sufficient.
+        print("NBS_INDEX", page, "hits", page_hits, "total_periods", len(found),
+              "bytes", len(r.content), "encoding", r.encoding, "apparent", r.apparent_encoding)
+        empty_pages = empty_pages + 1 if page_hits == 0 else 0
         if page_dates and min(page_dates) < start - dt.timedelta(days=45):
             old_enough_pages += 1
         elif page_dates:
             old_enough_pages = 0
         if old_enough_pages >= 2:
             break
-        if empty_pages >= 6 and page > 5:
+        if empty_pages >= 12 and page > 11:
             break
         time.sleep(0.04)
-
     return [found[k] for k in sorted(found)]
 
 
@@ -165,7 +166,6 @@ def parse_publish_date(html):
             if d:
                 return d
     text = " ".join(soup.stripped_strings)
-    # Release pages normally print publication time immediately below the title.
     for chunk in [text[:3500], text]:
         d = parse_date_any(chunk)
         if d:
@@ -187,22 +187,31 @@ def parse_price(html):
     for df in tables:
         for _, row in df.iterrows():
             vals = [_cell_text(x) for x in row.tolist()]
-            joined = " ".join(vals)
-            if "草甘膦" not in joined:
+            if "草甘膦" not in " ".join(vals):
                 continue
-            # NBS layout is product | unit | current price | change | pct.
             unit_idx = next((i for i, v in enumerate(vals) if v.strip() == "吨"), None)
             scan = vals[unit_idx + 1:] if unit_idx is not None else vals
             for v in scan:
                 z = re.sub(r"[,\s]", "", v)
                 if re.fullmatch(r"-?\d+(?:\.\d+)?", z):
                     x = float(z)
-                    if x > 1000:  # reject change/pct columns; glyphosate is yuan/tonne
+                    if x > 1000:
                         return x
-    soup = BeautifulSoup(html, "lxml")
-    text = " ".join(soup.stripped_strings)
+    text = " ".join(BeautifulSoup(html, "lxml").stripped_strings)
     m = re.search(r"农药[（(]草甘膦[^）)]*[）)]\s*吨\s*([0-9,]+(?:\.\d+)?)", text)
     return float(m.group(1).replace(",", "")) if m else None
+
+
+def expected_periods(start, end):
+    out = set()
+    cur = dt.date(start.year, start.month, 1)
+    while cur <= end:
+        for part, day in [("上旬", 10), ("中旬", 20), ("下旬", calendar.monthrange(cur.year, cur.month)[1])]:
+            pend = dt.date(cur.year, cur.month, day)
+            if start <= pend <= end:
+                out.add(f"{cur.year}-{cur.month:02d}-{part}")
+        cur = dt.date(cur.year + (cur.month == 12), 1 if cur.month == 12 else cur.month + 1, 1)
+    return out
 
 
 def main():
@@ -213,7 +222,6 @@ def main():
     ap.add_argument("--audit-json", default="work/industry_cycle_nbs_audit.json")
     ap.add_argument("--max-index-pages", type=int, default=120)
     args = ap.parse_args()
-
     start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     s = session()
@@ -243,14 +251,13 @@ def main():
             try:
                 r = s.get(url, timeout=30)
                 r.raise_for_status()
-                html = r.text
+                html = response_text(r)
                 pub = parse_publish_date(html) or rec.get("listed_date")
                 price = parse_price(html)
             except Exception as exc:
                 print("NBS_PAGE_ERR", period, url, repr(exc))
                 miss.append({"period": period, "reason": "page_error", "url": url})
                 continue
-
             if not pub or price is None:
                 print("NBS_PARSE_MISS", period, "pub", pub, "price", price, url)
                 con.execute("INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
@@ -263,7 +270,6 @@ def main():
                 print("NBS_DATE_REJECT", period, period_end, pub, url)
                 miss.append({"period": period, "reason": "bad_publish_date", "url": url})
                 continue
-
             con.execute("INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
                         (PRODUCT_ID, period, period_end.isoformat(), pub.isoformat(), price,
                          "元/吨", url, "OK", now))
@@ -277,20 +283,11 @@ def main():
             print("NBS_OK", i, len(releases), period, pub, price)
             time.sleep(0.04)
 
-        # Audit missing expected periods independently from discovery.
-        expected = set()
-        cur = dt.date(start.year, start.month, 1)
-        while cur <= end:
-            for part, day in [("上旬", 10), ("中旬", 20), ("下旬", calendar.monthrange(cur.year, cur.month)[1])]:
-                pend = dt.date(cur.year, cur.month, day)
-                if start <= pend <= end:
-                    expected.add(f"{cur.year}-{cur.month:02d}-{part}")
-            cur = dt.date(cur.year + (cur.month == 12), 1 if cur.month == 12 else cur.month + 1, 1)
+        expected = expected_periods(start, end)
         got = {x["period"] for x in ok}
         for p in sorted(expected - got):
             if not any(x.get("period") == p for x in miss):
                 miss.append({"period": p, "reason": "not_discovered"})
-
         mn, mx = con.execute(
             "SELECT MIN(date),MAX(date) FROM industry_product_daily WHERE source_id=?", (SOURCE_ID,)
         ).fetchone()
