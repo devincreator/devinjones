@@ -1,0 +1,72 @@
+name: pesticide-quant-cninfo-probe
+
+on:
+  push:
+    branches: [pesticide-cninfo-probe]
+    paths:
+      - 'pesticide_quant/cninfo_announcement_probe.py'
+      - '.github/workflows/pesticide_quant_cninfo_probe.yml'
+  pull_request:
+    branches: [pesticide-quant-run]
+    paths:
+      - 'pesticide_quant/cninfo_announcement_probe.py'
+      - '.github/workflows/pesticide_quant_cninfo_probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils
+          python -m pip install --upgrade pip
+          pip install pandas requests urllib3 tabulate
+      - name: Download frozen announcement research database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior out
+          gh run download 32440213590 -n pesticide-quant-announcement-1 -D prior
+          test -f prior/work/pesticide.sqlite
+      - name: Probe CNINFO historical list and PDFs
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/cninfo_announcement_probe.py \
+            --db prior/work/pesticide.sqlite \
+            --outdir out \
+            --start 2020-01-01 --end 2026-08-21 \
+            2>&1 | tee out/run.log
+      - name: Build report
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,pathlib,pandas as pd
+          root=pathlib.Path('out')
+          s=json.loads((root/'summary.json').read_text(encoding='utf-8')) if (root/'summary.json').exists() else {}
+          lines=['# 巨潮 vs 东方财富公告源测试','']
+          lines += [f"- 测试区间：{s.get('period')}",f"- 巨潮公告数：{s.get('cninfo_rows')}",f"- 东方财富公告数：{s.get('eastmoney_rows')}",f"- 标题/日期匹配：{s.get('matched_rows')}",f"- 巨潮分页完整：{s.get('pagination_complete')}",f"- 巨潮PDF抽样：{s.get('pdf_text_ok')} / {s.get('pdf_test_rows')}，成功率 {s.get('pdf_text_success_rate')}",f"- 结论：{s.get('decision')}",'']
+          p=root/'coverage_summary.csv'
+          if p.exists():
+              df=pd.read_csv(p)
+              lines += ['## 分公司覆盖','',df.to_markdown(index=False),'']
+          (root/'执行报告.md').write_text('\n'.join(lines),encoding='utf-8')
+          print('\n'.join(lines))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pesticide-quant-cninfo-probe-${{ github.run_number }}
+          path: out/**
+          retention-days: 30
