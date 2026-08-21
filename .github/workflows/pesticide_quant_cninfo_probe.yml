@@ -6,6 +6,11 @@ on:
     paths:
       - 'pesticide_quant/cninfo_announcement_probe.py'
       - '.github/workflows/pesticide_quant_cninfo_probe.yml'
+  pull_request:
+    branches: [pesticide-quant-run]
+    paths:
+      - 'pesticide_quant/cninfo_announcement_probe.py'
+      - '.github/workflows/pesticide_quant_cninfo_probe.yml'
   workflow_dispatch:
 
 permissions:
@@ -26,7 +31,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq poppler-utils
           python -m pip install --upgrade pip
-          pip install pandas requests urllib3
+          pip install pandas requests urllib3 tabulate
       - name: Download frozen announcement research database
         env:
           GH_TOKEN: ${{ github.token }}
