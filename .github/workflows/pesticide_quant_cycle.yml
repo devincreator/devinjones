@@ -34,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          python pesticide_quant/industry_cycle_nbs.py \
+          python pesticide_quant/industry_cycle_nbs_curl.py \
             --db work/pesticide.sqlite \
             --start 2020-06-01 \
             --audit-json work/industry_cycle_nbs_audit.json \
