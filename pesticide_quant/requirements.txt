@@ -8,4 +8,6 @@ xlrd>=2.0
 polars>=1.8
 httpx>=0.27
 certifi>=2024.7
+beautifulsoup4>=4.12
+lxml>=5.2
 git+https://github.com/rootSunc/CNEquity.git@a18ee0484dfb0801650175471724def3228b8a17
