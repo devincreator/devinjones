@@ -1,0 +1,96 @@
+name: pesticide-quant-announcement-pit-replay
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/pesticide_quant_announcement_pit_replay.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pesticide_quant/requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesticide_quant/requirements.txt
+
+      - name: Download frozen V1 research artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior
+          gh run download 32440213590 \
+            -n pesticide-quant-announcement-1 \
+            -D prior
+          test -f prior/work/pesticide.sqlite
+          cp prior/work/pesticide.sqlite work.sqlite
+          mkdir -p work/replay logs
+
+      - name: Correct announcement PIT timing on frozen data
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/announcement_pit_realign.py \
+            --db work.sqlite --max-gap-days 15 \
+            --audit-json work/replay/announcement_pit_realign_audit.json \
+            2>&1 | tee logs/announcement_pit_realign.log
+          python - <<'PY'
+          import pandas as pd, sqlite3
+          con=sqlite3.connect('work.sqlite')
+          e=pd.read_sql_query('select * from announcement_event order by canonical_code,notice_date,art_code',con)
+          e.to_csv('work/replay/announcement_events_corrected.csv',index=False,encoding='utf-8-sig')
+          con.close()
+          PY
+
+      - name: Rerun exact V1 incremental walk-forward
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest_announcement.py \
+            --db work.sqlite \
+            --outdir work/replay/backtest_announcement_corrected \
+            --allow-partial \
+            2>&1 | tee logs/backtest_announcement_corrected.log
+
+      - name: Build replay status
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,pathlib,sqlite3
+          d={}
+          p=pathlib.Path('work/replay/announcement_pit_realign_audit.json')
+          if p.exists(): d['pit_audit']=json.loads(p.read_text(encoding='utf-8'))
+          for rel in ['gate_announcement.json','backtest_announcement_summary.json']:
+              p=pathlib.Path('work/replay/backtest_announcement_corrected')/rel
+              if p.exists(): d[rel]=json.loads(p.read_text(encoding='utf-8'))
+          if pathlib.Path('work.sqlite').exists():
+              con=sqlite3.connect('work.sqlite')
+              d['counts']={t:con.execute(f'select count(*) from {t}').fetchone()[0] for t in ['announcement_raw','announcement_event','announcement_feature_daily','market_daily','financial_quarterly']}
+              con.close()
+          pathlib.Path('work/replay/replay_status.json').write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
+          print(json.dumps(d,ensure_ascii=False,indent=2))
+          PY
+
+      - name: Upload corrected replay
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pesticide-quant-announcement-pit-replay-${{ github.run_number }}
+          path: |
+            work/replay/**
+            logs/**
+          retention-days: 30
