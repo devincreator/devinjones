@@ -17,6 +17,12 @@ from curl_cffi import requests as curl_requests
 
 import industry_cycle_nbs as base
 
+_BROWSER = curl_requests.Session(impersonate="chrome")
+_HEADERS = {
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
+    "Referer": "https://www.stats.gov.cn/",
+}
+
 
 def decode(content: bytes) -> str:
     for enc in ("utf-8", "gb18030"):
@@ -32,15 +38,7 @@ def fetch_article_browser(_ordinary_session, url):
     best = None
     for candidate in base.article_variants(url):
         try:
-            r = curl_requests.get(
-                candidate,
-                impersonate="chrome",
-                timeout=40,
-                headers={
-                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.5",
-                    "Referer": "https://www.stats.gov.cn/",
-                },
-            )
+            r = _BROWSER.get(candidate, timeout=40, headers=_HEADERS)
             r.raise_for_status()
             html = decode(r.content)
             pub = base.parse_publish_date(html)
