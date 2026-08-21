@@ -12,7 +12,7 @@ import pandas as pd
 
 import backtest as base
 
-ACCEPTED_J003 = {"LOADED", "LOADED_OFFICIAL_WITH_SNAPSHOT_DIFF"}
+ACCEPTED_J003 = {"LOADED", "LOADED_OFFICIAL_WITH_SNAPSHOT_DIFF", "LOADED_OFFICIAL_FROZEN_FALLBACK"}
 
 
 def table_exists(con, name):
