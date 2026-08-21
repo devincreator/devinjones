@@ -6,6 +6,11 @@ on:
     paths:
       - '.github/workflows/pesticide_quant_pdf_probe_push.yml'
       - 'pesticide_quant/pdf_fulltext_probe.py'
+  pull_request:
+    branches: [pesticide-quant-run]
+    paths:
+      - '.github/workflows/pesticide_quant_pdf_probe_push.yml'
+      - 'pesticide_quant/pdf_fulltext_probe.py'
 
 permissions:
   contents: read
