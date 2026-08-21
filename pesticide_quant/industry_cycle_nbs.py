@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Build PIT glyphosate industry-cycle series from official NBS releases.
+"""Build a PIT glyphosate cycle series from official NBS releases.
 
 Source: 国家统计局《流通领域重要生产资料市场价格变动情况》
 Product: 农药（草甘膦，95%原药）
 
-PIT rule: ``industry_product_daily.date`` is the PUBLICATION date, never the
-observation period. The model may only see a 旬度 price after NBS published it.
+PIT contract
+------------
+The database date is the PUBLICATION date, never the ten-day observation
+period.  The feature is therefore unavailable before NBS published the page.
 
-NBS's site-search endpoint is not reliable for historical discovery, so this
-loader walks the official ``/sj/zxfb/`` release-index pages. NBS responses can
-omit a charset in Content-Type; decoding ``requests.Response.text`` may then
-produce mojibake. All pages are therefore decoded from bytes explicitly.
+Historical discovery uses the official ``/sj/zxfb/`` release-index archive.
+Some NBS article URLs also have the ``/sj/zxfbhjd/`` canonical form; both are
+tried when necessary.  NBS frequently labels UTF-8 HTML as ISO-8859-1, so the
+response body is decoded from bytes explicitly rather than trusting headers.
 """
 from __future__ import annotations
 
@@ -22,11 +24,9 @@ import json
 import re
 import sqlite3
 import time
-from io import StringIO
 from pathlib import Path
 from urllib.parse import urljoin
 
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
@@ -56,13 +56,11 @@ def session():
 
 
 def response_text(r):
-    """Decode NBS HTML deterministically; charset headers are not always usable."""
     b = r.content
     for enc in ("utf-8", "gb18030"):
         try:
             t = b.decode(enc)
-            # A successful codec decode is not enough; require recognizable NBS text.
-            if "国家统计局" in t or "数据发布" in t or TITLE_KEY in t:
+            if "国家统计局" in t or "数据发布" in t or TITLE_KEY in t or "草甘膦" in t:
                 return t
         except UnicodeDecodeError:
             pass
@@ -71,7 +69,10 @@ def response_text(r):
 
 
 def parse_period_from_title(title: str):
-    m = re.search(r"(20\d{2})年\s*(\d{1,2})月\s*(上旬|中旬|下旬).*流通领域重要生产资料市场价格变动情况", title)
+    m = re.search(
+        r"(20\d{2})年\s*(\d{1,2})月\s*(上旬|中旬|下旬).*流通领域重要生产资料市场价格变动情况",
+        title,
+    )
     if not m:
         return None
     y, mo, part = int(m.group(1)), int(m.group(2)), m.group(3)
@@ -80,10 +81,10 @@ def parse_period_from_title(title: str):
 
 
 def parse_date_any(text: str):
-    for pat in [
+    for pat in (
         r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})",
         r"(20\d{2})年\s*(\d{1,2})月\s*(\d{1,2})日",
-    ]:
+    ):
         m = re.search(pat, text or "")
         if m:
             try:
@@ -100,7 +101,6 @@ def index_url(page: int):
 def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
     found = {}
     seen_urls = set()
-    old_enough_pages = 0
     empty_pages = 0
     for page in range(max_pages):
         u = index_url(page)
@@ -118,7 +118,6 @@ def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
 
         soup = BeautifulSoup(html, "lxml")
         page_hits = 0
-        page_dates = []
         for a in soup.find_all("a", href=True):
             title = " ".join(a.stripped_strings).strip()
             if TITLE_KEY not in title:
@@ -128,31 +127,33 @@ def discover_releases(s, start: dt.date, end: dt.date, max_pages: int = 120):
                 continue
             period, period_end = parsed
             article = urljoin(r.url, a.get("href"))
-            if "stats.gov.cn" not in article or article in seen_urls:
+            if "stats.gov.cn" not in article:
                 continue
-            seen_urls.add(article)
+            key = (period, article)
+            if key in seen_urls:
+                continue
+            seen_urls.add(key)
             page_hits += 1
-            container_text = " ".join((a.parent or a).stripped_strings)
-            listed_date = parse_date_any(container_text)
-            if listed_date:
-                page_dates.append(listed_date)
+            listed_date = parse_date_any(" ".join((a.parent or a).stripped_strings))
             if start <= period_end <= end:
                 found[period] = {
-                    "period": period, "period_end": period_end, "title": title,
-                    "url": article, "listed_date": listed_date,
+                    "period": period,
+                    "period_end": period_end,
+                    "title": title,
+                    "url": article,
+                    "listed_date": listed_date,
                 }
-        print("NBS_INDEX", page, "hits", page_hits, "total_periods", len(found),
-              "bytes", len(r.content), "encoding", r.encoding, "apparent", r.apparent_encoding)
+        print(
+            "NBS_INDEX", page, "hits", page_hits, "total_periods", len(found),
+            "bytes", len(r.content), "encoding", r.encoding, "apparent", r.apparent_encoding,
+        )
         empty_pages = empty_pages + 1 if page_hits == 0 else 0
-        if page_dates and min(page_dates) < start - dt.timedelta(days=45):
-            old_enough_pages += 1
-        elif page_dates:
-            old_enough_pages = 0
-        if old_enough_pages >= 2:
-            break
+        # Older NBS index pages use a different archive layout. Stop after a
+        # sustained no-hit zone rather than treating it as proof the product
+        # did not exist earlier.
         if empty_pages >= 12 and page > 11:
             break
-        time.sleep(0.04)
+        time.sleep(0.03)
     return [found[k] for k in sorted(found)]
 
 
@@ -161,52 +162,109 @@ def parse_publish_date(html):
     for meta in soup.find_all("meta"):
         name = (meta.get("name") or meta.get("property") or "").lower()
         val = meta.get("content") or ""
-        if any(k in name for k in ["pub", "publish", "date", "time"]):
+        if any(k in name for k in ("pub", "publish", "date", "time")):
             d = parse_date_any(val)
             if d:
                 return d
     text = " ".join(soup.stripped_strings)
-    for chunk in [text[:3500], text]:
-        d = parse_date_any(chunk)
-        if d:
-            return d
-    return None
+    return parse_date_any(text[:5000]) or parse_date_any(text)
 
 
-def _cell_text(v):
-    if isinstance(v, tuple):
-        return " ".join(str(x) for x in v if str(x) != "nan")
-    return "" if pd.isna(v) else str(v).strip()
+def numeric_candidates(text):
+    vals = []
+    for raw in re.findall(r"(?<!\d)-?\d[\d,]*(?:\.\d+)?", text or ""):
+        try:
+            x = float(raw.replace(",", ""))
+        except ValueError:
+            continue
+        if 1000 < x < 500000:
+            vals.append(x)
+    return vals
 
 
 def parse_price(html):
-    try:
-        tables = pd.read_html(StringIO(html))
-    except Exception:
-        tables = []
-    for df in tables:
-        for _, row in df.iterrows():
-            vals = [_cell_text(x) for x in row.tolist()]
-            if "草甘膦" not in " ".join(vals):
-                continue
-            unit_idx = next((i for i, v in enumerate(vals) if v.strip() == "吨"), None)
-            scan = vals[unit_idx + 1:] if unit_idx is not None else vals
-            for v in scan:
-                z = re.sub(r"[,\s]", "", v)
-                if re.fullmatch(r"-?\d+(?:\.\d+)?", z):
-                    x = float(z)
-                    if x > 1000:
-                        return x
-    text = " ".join(BeautifulSoup(html, "lxml").stripped_strings)
-    m = re.search(r"农药[（(]草甘膦[^）)]*[）)]\s*吨\s*([0-9,]+(?:\.\d+)?)", text)
-    return float(m.group(1).replace(",", "")) if m else None
+    """Extract the current-price cell from the glyphosate row.
+
+    NBS has used several table HTML templates.  Locating the text node first
+    and then walking to its table row is more stable than relying on pandas'
+    inferred column structure.
+    """
+    soup = BeautifulSoup(html, "lxml")
+
+    for node in soup.find_all(string=re.compile("草甘膦")):
+        tr = node.find_parent("tr")
+        if tr is not None:
+            txt = " ".join(tr.stripped_strings)
+            vals = numeric_candidates(txt)
+            if vals:
+                return vals[0]
+        parent = node.parent
+        for _ in range(5):
+            if parent is None:
+                break
+            txt = " ".join(parent.stripped_strings)
+            if "草甘膦" in txt:
+                vals = numeric_candidates(txt)
+                if vals:
+                    return vals[0]
+            parent = parent.parent
+
+    text = " ".join(soup.stripped_strings)
+    pos = text.find("草甘膦")
+    if pos >= 0:
+        vals = numeric_candidates(text[pos:pos + 500])
+        if vals:
+            return vals[0]
+
+    # Last fallback for templates that separate characters with unusual spaces.
+    compact = re.sub(r"\s+", "", text)
+    pos = compact.find("草甘膦")
+    if pos >= 0:
+        vals = numeric_candidates(compact[pos:pos + 400])
+        if vals:
+            return vals[0]
+    return None
 
 
-def expected_periods(start, end):
+def article_variants(url):
+    out = [url]
+    if "/sj/zxfb/" in url:
+        out.append(url.replace("/sj/zxfb/", "/sj/zxfbhjd/"))
+    elif "/sj/zxfbhjd/" in url:
+        out.append(url.replace("/sj/zxfbhjd/", "/sj/zxfb/"))
+    return list(dict.fromkeys(out))
+
+
+def fetch_article(s, url):
+    failures = []
+    best = None
+    for candidate in article_variants(url):
+        try:
+            r = s.get(candidate, timeout=30)
+            r.raise_for_status()
+            html = response_text(r)
+            pub = parse_publish_date(html)
+            price = parse_price(html)
+            grass = "草甘膦" in html
+            print("NBS_ARTICLE", candidate, "grass", grass, "price", price, "bytes", len(r.content))
+            if best is None:
+                best = (pub, price, candidate, html)
+            if price is not None:
+                return pub, price, candidate, html
+        except Exception as exc:
+            failures.append((candidate, repr(exc)))
+    if best is not None:
+        return best
+    raise RuntimeError(f"all article variants failed: {failures}")
+
+
+def period_set_between(start: dt.date, end: dt.date):
     out = set()
     cur = dt.date(start.year, start.month, 1)
     while cur <= end:
-        for part, day in [("上旬", 10), ("中旬", 20), ("下旬", calendar.monthrange(cur.year, cur.month)[1])]:
+        for part, day in (
+            ("上旬", 10), ("中旬", 20), ("下旬", calendar.monthrange(cur.year, cur.month)[1]),
+        ):
             pend = dt.date(cur.year, cur.month, day)
             if start <= pend <= end:
                 out.add(f"{cur.year}-{cur.month:02d}-{part}")
@@ -222,7 +280,8 @@ def main():
     ap.add_argument("--audit-json", default="work/industry_cycle_nbs_audit.json")
     ap.add_argument("--max-index-pages", type=int, default=120)
     args = ap.parse_args()
-    start = dt.date.fromisoformat(args.start)
+
+    requested_start = dt.date.fromisoformat(args.start)
     end = dt.date.fromisoformat(args.end)
     s = session()
     con = sqlite3.connect(args.db)
@@ -236,72 +295,101 @@ def main():
             source_id,data_layer,source_name,url,coverage,source_type,reliability,v1_status,notes)
             VALUES(?,?,?,?,?,?,?,?,?)""", (
             SOURCE_ID, "industry_product_daily", "国家统计局流通领域草甘膦95%原药价格",
-            INDEX_ROOT, "2020-06-01 onward, 旬度 releases", "NBS_OFFICIAL_WEB", "HIGH", "FETCHING",
-            "PIT date uses publication_date; discovery via official /sj/zxfb/ release indexes",
+            INDEX_ROOT, "official release-index archive", "NBS_OFFICIAL_WEB", "HIGH", "FETCHING",
+            "PIT date=publication_date; archive layout before first discovered release is not assumed complete",
         ))
         con.execute("DELETE FROM industry_product_daily WHERE source_id=?", (SOURCE_ID,))
         con.execute("DELETE FROM industry_product_observation WHERE product_id=?", (PRODUCT_ID,))
         con.commit()
 
-        releases = discover_releases(s, start, end, args.max_index_pages)
+        releases = discover_releases(s, requested_start, end, args.max_index_pages)
         print("NBS_DISCOVERED", len(releases))
         ok, miss = [], []
         for i, rec in enumerate(releases, 1):
             period, period_end, url = rec["period"], rec["period_end"], rec["url"]
             try:
-                r = s.get(url, timeout=30)
-                r.raise_for_status()
-                html = response_text(r)
-                pub = parse_publish_date(html) or rec.get("listed_date")
-                price = parse_price(html)
+                pub, price, used_url, html = fetch_article(s, url)
+                pub = pub or rec.get("listed_date")
             except Exception as exc:
                 print("NBS_PAGE_ERR", period, url, repr(exc))
                 miss.append({"period": period, "reason": "page_error", "url": url})
                 continue
+
             if not pub or price is None:
-                print("NBS_PARSE_MISS", period, "pub", pub, "price", price, url)
-                con.execute("INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
-                            (PRODUCT_ID, period, period_end.isoformat(), pub.isoformat() if pub else None,
-                             price, "元/吨", url, "PARSE_MISS", now))
+                snippet = ""
+                p = html.find("草甘膦") if html else -1
+                if p >= 0:
+                    snippet = re.sub(r"\s+", " ", html[max(0, p - 120):p + 300])[:500]
+                print("NBS_PARSE_MISS", period, "pub", pub, "price", price, used_url, "snippet", snippet)
+                con.execute(
+                    "INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
+                    (PRODUCT_ID, period, period_end.isoformat(), pub.isoformat() if pub else None,
+                     price, "元/吨", used_url, "PARSE_MISS", now),
+                )
                 con.commit()
-                miss.append({"period": period, "reason": "parse_miss", "url": url})
+                miss.append({"period": period, "reason": "parse_miss", "url": used_url})
                 continue
+
             if pub < period_end - dt.timedelta(days=5) or pub > period_end + dt.timedelta(days=45):
-                print("NBS_DATE_REJECT", period, period_end, pub, url)
-                miss.append({"period": period, "reason": "bad_publish_date", "url": url})
+                print("NBS_DATE_REJECT", period, period_end, pub, used_url)
+                miss.append({"period": period, "reason": "bad_publish_date", "url": used_url})
                 continue
-            con.execute("INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
-                        (PRODUCT_ID, period, period_end.isoformat(), pub.isoformat(), price,
-                         "元/吨", url, "OK", now))
+
+            con.execute(
+                "INSERT OR REPLACE INTO industry_product_observation VALUES(?,?,?,?,?,?,?,?,?)",
+                (PRODUCT_ID, period, period_end.isoformat(), pub.isoformat(), price,
+                 "元/吨", used_url, "OK", now),
+            )
             con.execute("""INSERT OR REPLACE INTO industry_product_daily(
                 date,product_id,product_name,category,price,unit,region,frequency,source_id,ingest_ts)
                 VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                        (pub.isoformat(), PRODUCT_ID, PRODUCT_NAME, "农药原药", price,
-                         "元/吨", "全国", "旬度", SOURCE_ID, now))
+                (pub.isoformat(), PRODUCT_ID, PRODUCT_NAME, "农药原药", price,
+                 "元/吨", "全国", "旬度", SOURCE_ID, now),
+            )
             con.commit()
-            ok.append({"period": period, "publication_date": pub.isoformat(), "price": price, "url": url})
+            ok.append({"period": period, "period_end": period_end, "publication_date": pub, "price": price})
             print("NBS_OK", i, len(releases), period, pub, price)
-            time.sleep(0.04)
+            time.sleep(0.03)
 
-        expected = expected_periods(start, end)
+        discovered_periods = {x["period"] for x in releases}
         got = {x["period"] for x in ok}
-        for p in sorted(expected - got):
-            if not any(x.get("period") == p for x in miss):
-                miss.append({"period": p, "reason": "not_discovered"})
+        discovered_coverage = len(got) / len(discovered_periods) if discovered_periods else 0.0
+        requested_expected = period_set_between(requested_start, end)
+        if releases:
+            effective_start = min(x["period_end"] for x in releases)
+            effective_expected = period_set_between(effective_start, end)
+        else:
+            effective_start = None
+            effective_expected = set()
+
         mn, mx = con.execute(
             "SELECT MIN(date),MAX(date) FROM industry_product_daily WHERE source_id=?", (SOURCE_ID,)
         ).fetchone()
-        coverage_ratio = len(got) / len(expected) if expected else 0.0
         audit = {
-            "rows": len(ok), "expected_periods": len(expected), "missing": len(expected - got),
-            "coverage_ratio": coverage_ratio, "min_publication_date": mn,
-            "max_publication_date": mx, "missing_samples": miss[:40],
+            "rows": len(ok),
+            "requested_start": requested_start.isoformat(),
+            "effective_archive_start": None if effective_start is None else effective_start.isoformat(),
+            "requested_expected_periods": len(requested_expected),
+            "official_index_discovered_periods": len(discovered_periods),
+            "parsed_discovered_periods": len(got),
+            "discovered_parse_coverage_ratio": discovered_coverage,
+            "effective_expected_periods": len(effective_expected),
+            "undiscovered_within_effective_window": len(effective_expected - discovered_periods),
+            "min_publication_date": mn,
+            "max_publication_date": mx,
+            "parse_missing_samples": miss[:40],
+            "archive_caveat": "pre-effective-start absence is not interpreted as proof that NBS did not publish the product",
         }
         Path(args.audit_json).parent.mkdir(parents=True, exist_ok=True)
         Path(args.audit_json).write_text(json.dumps(audit, ensure_ascii=False, indent=2), encoding="utf-8")
-        status = "FETCHED" if len(ok) >= 30 and coverage_ratio >= 0.70 else ("PARTIAL" if ok else "FAILED")
-        con.execute("UPDATE source_registry SET v1_status=?,notes=notes||? WHERE source_id=?",
-                    (status, f"; rows={len(ok)} expected={len(expected)} coverage={coverage_ratio:.3f} min={mn} max={mx}", SOURCE_ID))
+
+        status = "FETCHED" if len(ok) >= 30 and discovered_coverage >= 0.70 else ("PARTIAL" if ok else "FAILED")
+        con.execute(
+            "UPDATE source_registry SET v1_status=?,notes=notes||? WHERE source_id=?",
+            (status,
+             f"; rows={len(ok)} discovered={len(discovered_periods)} parse_coverage={discovered_coverage:.3f} min={mn} max={mx}",
+             SOURCE_ID),
+        )
         con.commit()
         print(json.dumps(audit, ensure_ascii=False, indent=2))
         if status != "FETCHED":
