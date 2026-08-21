@@ -1,0 +1,38 @@
+name: pesticide-quant-nbs-probe
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/scripts/nbs_curl_probe.py'
+      - '.github/workflows/pesticide_quant_nbs_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install probe dependencies
+        run: pip install 'curl_cffi>=0.7' 'beautifulsoup4>=4.12' 'lxml>=5.2'
+      - name: Probe NBS official pages
+        id: probe
+        continue-on-error: true
+        run: python .github/scripts/nbs_curl_probe.py
+      - name: Upload probe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nbs-curl-probe-${{ github.run_number }}
+          path: work/nbs_curl_probe.json
+          retention-days: 7
+      - name: Enforce result
+        if: steps.probe.outcome != 'success'
+        run: exit 2
