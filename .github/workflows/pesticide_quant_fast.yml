@@ -14,7 +14,7 @@ permissions:
 jobs:
   formal-tech-fin:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -71,13 +71,27 @@ jobs:
             --data-dir astock_data \
             2>&1 | tee logs/market_astock.log
 
-      - name: Fill BSE market from Sina
-        id: bse
+      - name: Sina qfq gap fill
+        id: gapfill
         continue-on-error: true
         shell: bash
         run: |
           set -o pipefail
-          python pesticide_quant/bse_sina.py --db work/pesticide.sqlite 2>&1 | tee logs/market_bse_sina.log
+          python pesticide_quant/sina_gap_fill.py \
+            --db work/pesticide.sqlite \
+            2>&1 | tee logs/market_sina_gapfill.log
+
+      - name: Interval-level market coverage audit
+        id: coverage
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/market_coverage_audit_v2.py \
+            --db work/pesticide.sqlite \
+            --out-csv work/market_interval_coverage.csv \
+            --out-json work/market_interval_coverage.json \
+            2>&1 | tee logs/market_interval_coverage.log
 
       - name: Fetch PIT financials from Eastmoney
         id: finance
@@ -135,8 +149,8 @@ jobs:
           counts={t:con.execute(f'SELECT COUNT(*) FROM {t}').fetchone()[0] for t in ['industry_membership_history','market_daily','financial_quarterly','capital_flow_daily','industry_product_daily']}
           jobs=con.execute('SELECT job_id,status,target_entities,loaded_entities,loaded_rows,min_date,max_date,note FROM ingestion_job ORDER BY job_id').fetchall()
           con.close()
-          d={'counts':counts,'jobs':jobs,'bse_step':'${{ steps.bse.outcome }}','finance_step':'${{ steps.finance.outcome }}','formal_step':'${{ steps.formal.outcome }}'}
-          for rel in ['backtest_formal_v2/gate.json','backtest_formal_v2/backtest_summary.json','backtest_partial_v2/gate.json','backtest_partial_v2/backtest_summary.json']:
+          d={'counts':counts,'jobs':jobs,'gapfill_step':'${{ steps.gapfill.outcome }}','coverage_step':'${{ steps.coverage.outcome }}','finance_step':'${{ steps.finance.outcome }}','formal_step':'${{ steps.formal.outcome }}'}
+          for rel in ['market_interval_coverage.json','backtest_formal_v2/gate.json','backtest_formal_v2/backtest_summary.json','backtest_partial_v2/gate.json','backtest_partial_v2/backtest_summary.json']:
               p=pathlib.Path('work')/rel
               if p.exists(): d[rel]=json.loads(p.read_text(encoding='utf-8'))
           pathlib.Path('work/pipeline_status_v2.json').write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding='utf-8')
