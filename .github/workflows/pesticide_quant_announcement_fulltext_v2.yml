@@ -1,0 +1,123 @@
+name: pesticide-quant-announcement-fulltext-v2
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'pesticide_quant/announcement_fulltext_v2.py'
+      - 'pesticide_quant/announcement_fulltext_v2_guard.py'
+      - 'pesticide_quant/backtest_announcement_v2.py'
+      - '.github/workflows/pesticide_quant_announcement_fulltext_v2.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  fulltext-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: pesticide_quant/requirements.txt
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pesticide_quant/requirements.txt
+
+      - name: Download frozen V1 research database
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior work/v2 logs
+          gh run download 32440213590 -n pesticide-quant-announcement-1 -D prior
+          test -f prior/work/pesticide.sqlite
+          cp prior/work/pesticide.sqlite work.sqlite
+
+      - name: Rebuild audited title V1.1 baseline
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/announcement_rebuild_v1_1.py \
+            --db work.sqlite --max-gap-days 15 \
+            --audit-json work/v2/title_v1_1_audit.json \
+            2>&1 | tee logs/title_v1_1.log
+
+      - name: Fetch full text and build event chains V2
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/announcement_fulltext_v2.py \
+            --db work.sqlite --workers 8 \
+            --audit-json work/v2/fulltext_v2_audit.json \
+            2>&1 | tee logs/fulltext_v2.log
+
+      - name: Apply deterministic full-text semantic guards
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/announcement_fulltext_v2_guard.py \
+            --db work.sqlite \
+            --audit-json work/v2/fulltext_v2_guard_audit.json \
+            2>&1 | tee logs/fulltext_v2_guard.log
+
+      - name: Export guarded event-chain evidence
+        run: |
+          python - <<'PY'
+          import sqlite3,pandas as pd
+          con=sqlite3.connect('work.sqlite')
+          ev=pd.read_sql_query('SELECT * FROM announcement_event_v2 ORDER BY canonical_code,effective_date,art_code',con)
+          ev.to_csv('work/v2/announcement_events_v2_guarded.csv',index=False,encoding='utf-8-sig')
+          sample=ev[(ev.long_setup_flag>0)|(ev.recent_acceleration_event>0)|(ev.negative_acceleration_event>0)].copy()
+          sample=sample.sort_values(['recent_acceleration_event','negative_acceleration_event','hardness_v2'],ascending=False).head(500)
+          sample.to_csv('work/v2/event_chain_high_information_sample.csv',index=False,encoding='utf-8-sig')
+          ft=pd.read_sql_query("SELECT canonical_code,art_code,notice_date,title,text_chars,fetch_status,attach_url FROM announcement_fulltext_v2 ORDER BY notice_date",con)
+          ft.to_csv('work/v2/fulltext_fetch_manifest.csv',index=False,encoding='utf-8-sig')
+          con.close()
+          PY
+
+      - name: Run full-text V2 PIT walk-forward
+        shell: bash
+        run: |
+          set -o pipefail
+          python pesticide_quant/backtest_announcement_v2.py \
+            --db work.sqlite --outdir work/v2/backtest \
+            2>&1 | tee logs/backtest_v2.log
+
+      - name: Build execution report
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,pathlib,pandas as pd
+          root=pathlib.Path('work/v2')
+          def j(name):
+              p=root/name
+              return json.loads(p.read_text(encoding='utf-8')) if p.exists() else {}
+          a=j('fulltext_v2_audit.json'); g=j('fulltext_v2_guard_audit.json'); s=j('backtest/summary_v2.json')
+          lines=['# 农药公告全文事件链 V2 执行报告','']
+          lines += [f"- 全文候选公告：{a.get('candidate_rows')}",f"- 全文成功：{a.get('fulltext_ok')} / 失败：{a.get('fulltext_failed')}",f"- 全文覆盖率：{a.get('fulltext_coverage')}",f"- 长期布局事件：{a.get('long_setup_events')}",f"- 正向加速事件：{a.get('positive_acceleration_events')}",f"- 负向加速事件：{a.get('negative_acceleration_events')}",f"- 语义守卫修改：{g.get('changed_from_unguarded')}，其中负转正修复：{g.get('negative_to_positive_repairs')}",'']
+          delta=s.get('incremental_delta',[])
+          if delta:
+              lines += ['## OOS 增量','']
+              for r in delta:
+                  lines.append(f"- {r.get('comparison')}: precision {r.get('precision_base')} -> {r.get('precision_new')} (Δ {r.get('precision_delta')}), AUC {r.get('auc_base')} -> {r.get('auc_new')} (Δ {r.get('auc_delta')})")
+          lines += ['','## 判定规则','','机会侧只有在全文 V2 同时优于 TECH+FIN 与标题 V1.1，且非重叠60日事件稳定时才保留。风险侧只看负面全文特征集，不把全部公告特征硬塞入风险模型。']
+          (root/'执行报告_v2.md').write_text('\n'.join(lines),encoding='utf-8')
+          print('\n'.join(lines))
+          PY
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pesticide-quant-announcement-fulltext-v2-${{ github.run_number }}
+          path: |
+            work/v2/**
+            logs/**
+          retention-days: 30
