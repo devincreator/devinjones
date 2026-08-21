@@ -1,0 +1,35 @@
+name: pesticide-quant-pdf-probe-push
+
+on:
+  push:
+    branches: [pesticide-v2-pdf-fallback]
+    paths:
+      - '.github/workflows/pesticide_quant_pdf_probe_push.yml'
+      - 'pesticide_quant/pdf_fulltext_probe.py'
+  pull_request:
+    branches: [pesticide-quant-run]
+    paths:
+      - '.github/workflows/pesticide_quant_pdf_probe_push.yml'
+      - 'pesticide_quant/pdf_fulltext_probe.py'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install poppler
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils
+      - name: Probe deterministic Eastmoney PDF URLs
+        run: |
+          python pesticide_quant/pdf_fulltext_probe.py --out pdf_probe.json
+          cat pdf_probe.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pesticide-pdf-probe-${{ github.run_number }}
+          path: pdf_probe.json
+          retention-days: 30
